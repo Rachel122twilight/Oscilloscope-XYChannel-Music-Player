@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>XY Audio Vectorscope</title>
+<style>
+body{margin:0;background:#000;color:#ddd;font-family:Arial}
+#top{display:flex;gap:10px;flex-wrap:wrap;padding:10px;background:#111}
+label{font-size:12px;display:flex;flex-direction:column}
+canvas{display:block;width:100vw;height:calc(100vh - 110px)}
+input[type=range]{width:120px}
+button,input,select{background:#222;color:#ddd;border:1px solid #444}
+#stats{padding:4px 10px;background:#111;font-size:12px}
+</style>
+</head>
+<body>
+<div id="top">
+<input type="file" id="file" accept="audio/*">
+<button id="play">Play</button>
+<button id="pause">Pause</button>
+<button id="stop">Stop</button>
+<button id="shot">PNG</button>
+<button id="full">Fullscreen</button>
+
+<label>Gain<input id="gain" type="range" min="0.1" max="5" step="0.1" value="1"></label>
+<label>Zoom<input id="zoom" type="range" min="0.2" max="4" step="0.1" value="1"></label>
+<label>Rotation<input id="rot" type="range" min="0" max="360" step="1" value="0"></label>
+<label>Persistence<input id="per" type="range" min="0.01" max="0.5" step="0.01" value="0.08"></label>
+<label>Glow<input id="glow" type="range" min="0" max="50" step="1" value="15"></label>
+<label>Samples<input id="samples" type="range" min="256" max="4096" step="256" value="2048"></label>
+
+<select id="theme">
+<option value="#00ff66">Green</option>
+<option value="#ffbb00">Amber</option>
+<option value="#00ccff">Blue</option>
+<option value="#ffffff">White</option>
+<option value="rainbow">Rainbow</option>
+</select>
+
+<select id="mode">
+<option value="line">Line</option>
+<option value="dot">Dot</option>
+</select>
+</div>
+
+<div id="stats">Ready</div>
+<canvas id="c"></canvas>
+
+<audio id="audio" controls style="width:100%"></audio>
+
+<script>
+const canvas=document.getElementById("c");
+const ctx=canvas.getContext("2d");
+const audio=document.getElementById("audio");
+const stats=document.getElementById("stats");
+
+function resize(){
+canvas.width=innerWidth*devicePixelRatio;
+canvas.height=(innerHeight-150)*devicePixelRatio;
+}
+resize();
+addEventListener("resize",resize);
+
+const AC=window.AudioContext||window.webkitAudioContext;
+const ac=new AC();
+
+const src=ac.createMediaElementSource(audio);
+const splitter=ac.createChannelSplitter(2);
+const analyserL=ac.createAnalyser();
+const analyserR=ac.createAnalyser();
+
+analyserL.fftSize=2048;
+analyserR.fftSize=2048;
+
+src.connect(splitter);
+splitter.connect(analyserL,0);
+splitter.connect(analyserR,1);
+src.connect(ac.destination);
+
+const left=new Uint8Array(4096);
+const right=new Uint8Array(4096);
+
+file.onchange=e=>{
+const f=e.target.files[0];
+if(f) audio.src=URL.createObjectURL(f);
+};
+
+document.body.addEventListener("dragover",e=>e.preventDefault());
+document.body.addEventListener("drop",e=>{
+e.preventDefault();
+const f=e.dataTransfer.files[0];
+if(f){
+audio.src=URL.createObjectURL(f);
+}
+});
+
+play.onclick=async()=>{
+await ac.resume();
+audio.play();
+};
+
+pause.onclick=()=>audio.pause();
+
+stop.onclick=()=>{
+audio.pause();
+audio.currentTime=0;
+};
+
+full.onclick=()=>document.documentElement.requestFullscreen();
+
+shot.onclick=()=>{
+const a=document.createElement("a");
+a.href=canvas.toDataURL("image/png");
+a.download="vectorscope.png";
+a.click();
+};
+
+function rms(arr,n){
+let s=0;
+for(let i=0;i<n;i++){
+let v=(arr[i]-128)/128;
+s+=v*v;
+}
+return Math.sqrt(s/n);
+}
+
+function corr(a,b,n){
+let sx=0,sy=0,sxy=0,sx2=0,sy2=0;
+for(let i=0;i<n;i++){
+let x=(a[i]-128)/128;
+let y=(b[i]-128)/128;
+sx+=x;
+sy+=y;
+sxy+=x*y;
+sx2+=x*x;
+sy2+=y*y;
+}
+let num=n*sxy-sx*sy;
+let den=Math.sqrt((n*sx2-sx*sx)*(n*sy2-sy*sy));
+return den?num/den:0;
+}
+
+function draw(){
+requestAnimationFrame(draw);
+
+const count=+samples.value;
+
+analyserL.fftSize=count;
+analyserR.fftSize=count;
+
+const len=analyserL.fftSize;
+
+analyserL.getByteTimeDomainData(left);
+analyserR.getByteTimeDomainData(right);
+
+ctx.fillStyle=`rgba(0,0,0,${per.value})`;
+ctx.fillRect(0,0,canvas.width,canvas.height);
+
+const gainV=+gain.value;
+const zoomV=+zoom.value;
+const rotV=(+rot.value)*Math.PI/180;
+
+let color=theme.value;
+if(color==="rainbow"){
+color=`hsl(${(performance.now()*0.05)%360},100%,50%)`;
+}
+
+ctx.shadowColor=color;
+ctx.shadowBlur=+glow.value;
+ctx.strokeStyle=color;
+ctx.fillStyle=color;
+ctx.lineWidth=1.5*devicePixelRatio;
+
+const cx=canvas.width/2;
+const cy=canvas.height/2;
+const scale=Math.min(canvas.width,canvas.height)*0.38*zoomV;
+
+ctx.beginPath();
+
+for(let i=0;i<len;i++){
+
+let x=((left[i]-128)/128)*gainV;
+let y=((right[i]-128)/128)*gainV;
+
+let xr=x*Math.cos(rotV)-y*Math.sin(rotV);
+let yr=x*Math.sin(rotV)+y*Math.cos(rotV);
+
+let sx=cx+xr*scale;
+let sy=cy-yr*scale;
+
+if(mode.value==="dot"){
+ctx.fillRect(sx,sy,2,2);
+}else{
+if(i===0) ctx.moveTo(sx,sy);
+else ctx.lineTo(sx,sy);
+}
+}
+
+if(mode.value==="line") ctx.stroke();
+
+ctx.shadowBlur=0;
+
+ctx.strokeStyle="rgba(255,255,255,0.15)";
+ctx.beginPath();
+ctx.moveTo(cx,0);
+ctx.lineTo(cx,canvas.height);
+ctx.moveTo(0,cy);
+ctx.lineTo(canvas.width,cy);
+ctx.stroke();
+
+const rL=rms(left,len);
+const rR=rms(right,len);
+const c=corr(left,right,len);
+
+stats.textContent=
+`Time ${audio.currentTime.toFixed(1)}s / ${isFinite(audio.duration)?audio.duration.toFixed(1):0}s | RMS L ${rL.toFixed(3)} | RMS R ${rR.toFixed(3)} | Correlation ${c.toFixed(3)}`;
+}
+draw();
+</script>
+</body>
+</html>
